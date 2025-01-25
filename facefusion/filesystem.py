@@ -1,160 +1,134 @@
 import glob
 import os
 import shutil
-from pathlib import Path
+import time
 from typing import List, Optional
 
-import filetype
+import facefusion.choices
+from facefusion import logger
 
-from facefusion.common_helper import is_windows
-from facefusion.typing import File
+def _error_handler(func, *args, retries=3, delay=1, **kwargs):
+    for attempt in range(retries):
+        try:
+            result = func(*args, **kwargs)
+            if attempt > 0:
+                logger.debug(f"Success on attempt {attempt+1}/{retries} for {func.__name__}", __name__)
+            return result
+        except Exception as e:
+            logger.debug(f"Error on attempt {attempt+1}/{retries} for {func.__name__}: {str(e)}", __name__)
+            if attempt < retries - 1:
+                time.sleep(delay)
+            else:
+                raise
 
-if is_windows():
-	import ctypes
+def is_file(file_path: str) -> bool:
+    return bool(file_path and _error_handler(os.path.isfile, file_path))
 
+def is_directory(directory_path: str) -> bool:
+    return bool(directory_path and _error_handler(os.path.isdir, directory_path))
 
-def get_file_size(file_path : str) -> int:
-	if is_file(file_path):
-		return os.path.getsize(file_path)
-	return 0
+def get_file_size(file_path: str) -> int:
+    return _error_handler(os.path.getsize, file_path) if is_file(file_path) else 0
 
+def get_file_name(file_path: str) -> Optional[str]:
+    name, _ = os.path.splitext(os.path.basename(file_path))
+    return name if name else None
 
-def same_file_extension(file_paths : List[str]) -> bool:
-	file_extensions : List[str] = []
+def get_file_extension(file_path: str) -> Optional[str]:
+    _, extension = os.path.splitext(file_path)
+    return extension.lower() if extension else None
 
-	for file_path in file_paths:
-		_, file_extension = os.path.splitext(file_path.lower())
+def get_file_format(file_path: str) -> Optional[str]:
+    extension = get_file_extension(file_path)
+    if not extension:
+        return None
+    return {
+        '.jpg': 'jpeg',
+        '.tif': 'tiff'
+    }.get(extension, extension.lstrip('.'))
 
-		if file_extensions and file_extension not in file_extensions:
-			return False
-		file_extensions.append(file_extension)
-	return True
+def same_file_extension(first_path: str, second_path: str) -> bool:
+    return get_file_extension(first_path) == get_file_extension(second_path)
 
+def _is_media_type(path: str, formats: List[str]) -> bool:
+    return is_file(path) and get_file_format(path) in formats
 
-def is_file(file_path : str) -> bool:
-	return bool(file_path and os.path.isfile(file_path))
+def is_audio(audio_path: str) -> bool:
+    return _is_media_type(audio_path, facefusion.choices.audio_formats)
 
+def has_audio(audio_paths: List[str]) -> bool:
+    return any(map(is_audio, audio_paths)) if audio_paths else False
 
-def is_directory(directory_path : str) -> bool:
-	return bool(directory_path and os.path.isdir(directory_path))
+def are_audios(audio_paths: List[str]) -> bool:
+    return all(map(is_audio, audio_paths)) if audio_paths else False
 
-
-def in_directory(file_path : str) -> bool:
-	if file_path and not is_directory(file_path):
-		return is_directory(os.path.dirname(file_path))
-	return False
-
-
-def is_audio(audio_path : str) -> bool:
-	return is_file(audio_path) and filetype.helpers.is_audio(audio_path)
-
-
-def has_audio(audio_paths : List[str]) -> bool:
-	if audio_paths:
-		return any(is_audio(audio_path) for audio_path in audio_paths)
-	return False
-
-
-def is_image(image_path : str) -> bool:
-	return is_file(image_path) and filetype.helpers.is_image(image_path)
-
+def is_image(image_path: str) -> bool:
+    return _is_media_type(image_path, facefusion.choices.image_formats)
 
 def has_image(image_paths: List[str]) -> bool:
-	if image_paths:
-		return any(is_image(image_path) for image_path in image_paths)
-	return False
+    return any(map(is_image, image_paths)) if image_paths else False
 
+def are_images(image_paths: List[str]) -> bool:
+    return all(map(is_image, image_paths)) if audio_paths else False
 
-def is_video(video_path : str) -> bool:
-	return is_file(video_path) and filetype.helpers.is_video(video_path)
+def is_video(video_path: str) -> bool:
+    return _is_media_type(video_path, facefusion.choices.video_formats)
 
+def has_video(video_paths: List[str]) -> bool:
+    return any(map(is_video, video_paths)) if video_paths else False
 
-def filter_audio_paths(paths : List[str]) -> List[str]:
-	if paths:
-		return [ path for path in paths if is_audio(path) ]
-	return []
+def are_videos(video_paths: List[str]) -> bool:
+    return all(map(is_video, video_paths)) if video_paths else False
 
+def filter_audio_paths(paths: List[str]) -> List[str]:
+    return [p for p in paths if is_audio(p)] if paths else []
 
-def filter_image_paths(paths : List[str]) -> List[str]:
-	if paths:
-		return [ path for path in paths if is_image(path) ]
-	return []
+def filter_image_paths(paths: List[str]) -> List[str]:
+    return [p for p in paths if is_image(p)] if paths else []
 
+def _file_operation(operation, src, dest, success_condition):
+    _error_handler(operation, src, dest)
+    return success_condition()
 
-def resolve_relative_path(path : str) -> str:
-	return os.path.abspath(os.path.join(os.path.dirname(__file__), path))
+def copy_file(file_path: str, move_path: str) -> bool:
+    return _file_operation(shutil.copy, file_path, move_path, lambda: is_file(move_path)) if is_file(file_path) else False
 
+def move_file(file_path: str, move_path: str) -> bool:
+    return _file_operation(shutil.move, file_path, move_path, lambda: not is_file(file_path) and is_file(move_path)) if is_file(file_path) else False
 
-def sanitize_path_for_windows(full_path : str) -> Optional[str]:
-	buffer_size = 0
+def remove_file(file_path: str) -> bool:
+    return _file_operation(os.remove, file_path, None, lambda: not is_file(file_path)) if is_file(file_path) else False
 
-	while True:
-		unicode_buffer = ctypes.create_unicode_buffer(buffer_size)
-		buffer_limit = ctypes.windll.kernel32.GetShortPathNameW(full_path, unicode_buffer, buffer_size) #type:ignore[attr-defined]
+def resolve_file_paths(directory_path: str) -> List[str]:
+    if not is_directory(directory_path):
+        return []
+    entries = _error_handler(os.listdir, directory_path)
+    return [
+        os.path.join(directory_path, entry)
+        for entry in sorted(entries)
+        if not entry.startswith(('.', '__'))
+    ]
 
-		if buffer_size > buffer_limit:
-			return unicode_buffer.value
-		if buffer_limit == 0:
-			return None
-		buffer_size = buffer_limit
+def resolve_file_pattern(file_pattern: str) -> List[str]:
+    return sorted(_error_handler(glob.glob, file_pattern)) if in_directory(file_pattern) else []
 
+def in_directory(file_path: str) -> bool:
+    if not file_path:
+        return False
+    dir_path = os.path.dirname(file_path)
+    return bool(dir_path and not is_directory(file_path) and is_directory(dir_path))
 
-def copy_file(file_path : str, move_path : str) -> bool:
-	if is_file(file_path):
-		shutil.copy(file_path, move_path)
-		return is_file(move_path)
-	return False
+def create_directory(directory_path: str) -> bool:
+    if not directory_path or is_file(directory_path):
+        return False
+    _error_handler(os.makedirs, directory_path, exist_ok=True)
+    return is_directory(directory_path)
 
+def remove_directory(directory_path: str) -> bool:
+    if not is_directory(directory_path):
+        return False
+    _error_handler(shutil.rmtree, directory_path, ignore_errors=True)
+    return not is_directory(directory_path)
 
-def move_file(file_path : str, move_path : str) -> bool:
-	if is_file(file_path):
-		shutil.move(file_path, move_path)
-		return not is_file(file_path) and is_file(move_path)
-	return False
-
-
-def remove_file(file_path : str) -> bool:
-	if is_file(file_path):
-		os.remove(file_path)
-		return not is_file(file_path)
-	return False
-
-
-def create_directory(directory_path : str) -> bool:
-	if directory_path and not is_file(directory_path):
-		Path(directory_path).mkdir(parents = True, exist_ok = True)
-		return is_directory(directory_path)
-	return False
-
-
-def list_directory(directory_path : str) -> Optional[List[File]]:
-	if is_directory(directory_path):
-		file_paths = sorted(os.listdir(directory_path))
-		files: List[File] = []
-
-		for file_path in file_paths:
-			file_name, file_extension = os.path.splitext(file_path)
-
-			if not file_name.startswith(('.', '__')):
-				files.append(
-				{
-					'name': file_name,
-					'extension': file_extension,
-					'path': os.path.join(directory_path, file_path)
-				})
-
-		return files
-	return None
-
-
-def resolve_file_pattern(file_pattern : str) -> List[str]:
-	if in_directory(file_pattern):
-		return sorted(glob.glob(file_pattern))
-	return []
-
-
-def remove_directory(directory_path : str) -> bool:
-	if is_directory(directory_path):
-		shutil.rmtree(directory_path, ignore_errors = True)
-		return not is_directory(directory_path)
-	return False
+def resolve_relative_path(path: str) -> str:
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), path))
